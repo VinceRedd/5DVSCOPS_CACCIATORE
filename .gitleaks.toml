@@ -1,0 +1,24 @@
+title = "Gitleaks config — 5DVSCOPS CACCIATORE"
+
+# Hérite des règles natives Gitleaks (AWS keys, GitHub PAT, etc.)
+[extend]
+useDefault = true
+
+# Règle custom : Django SECRET_KEY codée en dur
+[[rules]]
+id = "django-secret-key"
+description = "Django SECRET_KEY committed in source"
+regex = '''SECRET_KEY\s*=\s*["'](?!os\.environ|TODO_SET|build-only-placeholder)[A-Za-z0-9\-_@#$%^&*()]{20,}["']'''
+tags = ["django", "secret", "custom"]
+
+[allowlist]
+description = "Valeurs de démo/placeholder acceptées"
+regexes = [
+  '''TODO_SET_SECRET_KEY''',
+  '''build-only-placeholder''',
+]
+paths = [
+  '''\.github/workflows/''',
+  '''policy/''',
+  '''docs/''',
+]

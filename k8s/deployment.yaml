@@ -1,0 +1,86 @@
+---
+# =============================================================================
+# Deployment Kubernetes durci — django-soft-sec
+# Conforme à la policy Rego (policy/security.rego)
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: django-soft
+  labels:
+    app: django-soft
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: django-soft
+  template:
+    metadata:
+      labels:
+        app: django-soft
+    spec:
+      # --- Pod-level : hardening commun à tous les containers ---
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: django-soft
+          image: vinceredd/django-soft:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 5005
+              protocol: TCP
+          env:
+            - name: DEBUG
+              value: "False"
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: django-soft-secret
+                  key: secret-key
+          # --- Container-level : durcissement explicite ---
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          # --- Limites de ressources : anti-DoS ---
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          # --- Probes : détection de worker figé ---
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 25
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          # --- Volumes requis par readOnlyRootFilesystem ---
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: app-cache
+              mountPath: /app/.cache
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: app-cache
+          emptyDir: {}

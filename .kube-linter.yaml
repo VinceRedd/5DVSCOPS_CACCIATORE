@@ -1,0 +1,7 @@
+checks:
+  addAllBuiltIn: true
+  exclude:
+    # On n'a pas défini de NetworkPolicy pour ce projet de démo
+    - "no-anti-affinity"
+    - "minimum-three-replicas"
+    # Le manifeste insecure est intentionnellement non-conforme ; on le gère via Conftest

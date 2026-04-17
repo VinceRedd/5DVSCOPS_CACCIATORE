@@ -1,0 +1,16 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: django-soft
+  labels:
+    app: django-soft
+spec:
+  type: ClusterIP
+  selector:
+    app: django-soft
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP

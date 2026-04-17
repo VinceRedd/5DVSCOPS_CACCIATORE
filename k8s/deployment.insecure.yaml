@@ -1,0 +1,27 @@
+---
+# =============================================================================
+# Manifeste VOLONTAIREMENT insecure — utilisé pour démontrer que la policy
+# Conftest refuse bien les déploiements non conformes.
+# Pas de securityContext → runs as root → rejeté par la règle 1.
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: django-soft-insecure
+  labels:
+    app: django-soft-insecure
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: django-soft-insecure
+  template:
+    metadata:
+      labels:
+        app: django-soft-insecure
+    spec:
+      containers:
+        - name: django-soft
+          image: vinceredd/django-soft:latest
+          ports:
+            - containerPort: 5005

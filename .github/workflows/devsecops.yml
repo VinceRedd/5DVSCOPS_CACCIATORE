@@ -1,0 +1,286 @@
+name: DevSecOps CI
+
+# =============================================================================
+# Pipeline DevSecOps — 5DVSCOPS / CACCIATORE
+# -----------------------------------------------------------------------------
+# Déclenché sur push/PR vers main. Actions :
+#   1. secrets-scan    — Gitleaks (rappel TP1)
+#   2. lint            — yamllint + Hadolint + kube-linter
+#   3. sca-fs          — Trivy filesystem sur requirements.txt
+#   4. build           — docker build UNE seule fois (artifact réutilisé ensuite)
+#   5. image-scan      — Trivy image sur l'image construite
+#   6. sbom            — Syft CycloneDX sur l'image construite (rappel TP2)
+#   7. policy-check    — Conftest/Rego sur k8s/ (test positif ET négatif)
+#   8. quality-gate    — agrège tout, point unique de protection de branche
+# =============================================================================
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+# Permissions minimales par défaut (principe du moindre privilège)
+permissions:
+  contents: read
+  security-events: write   # upload SARIF dans l'onglet Security
+
+env:
+  IMAGE_NAME: django-soft-sec
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+
+  # ===========================================================================
+  # JOB 1 — Détection de secrets avec Gitleaks (rappel TP1)
+  # ===========================================================================
+  secrets-scan:
+    name: Secrets — Gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history pour scanner tous les commits)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan secrets avec Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: true
+
+  # ===========================================================================
+  # JOB 2 — Lint (3 linters en parallèle)
+  # ===========================================================================
+  lint:
+    name: Lint — YAML + Dockerfile + K8s
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint YAML (yamllint)
+        uses: ibiqlik/action-yamllint@v3
+        with:
+          file_or_dir: k8s/ .github/workflows/
+          config_file: .yamllint.yml
+
+      - name: Lint Dockerfile (Hadolint)
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: error
+          # warning aurait bloqué sur DL3008 (version pin apt) : choix assumé
+
+      - name: Lint Kubernetes (kube-linter)
+        uses: stackrox/kube-linter-action@v1
+        with:
+          directory: k8s/
+          config: .kube-linter.yaml
+        continue-on-error: true   # N'échoue pas : informatif
+
+  # ===========================================================================
+  # JOB 3 — Trivy filesystem sur les dépendances
+  # ===========================================================================
+  sca-fs:
+    name: SCA — Trivy FS (requirements.txt)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trivy FS — table dans les logs
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,misconfig,secret
+          severity: HIGH,CRITICAL
+          format: table
+          exit-code: '0'
+
+      - name: Trivy FS — export SARIF
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: trivy-fs.sarif
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+
+      - name: Upload SARIF (onglet Security)
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-fs
+
+  # ===========================================================================
+  # JOB 4 — Build Docker (une seule fois, partagé via artifact)
+  # ===========================================================================
+  build:
+    name: Build — Image Docker
+    runs-on: ubuntu-latest
+    needs: [lint, secrets-scan]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image + export tarball
+        run: |
+          IMAGE="${IMAGE_NAME}:${IMAGE_TAG}"
+          docker build -t "${IMAGE}" -t "${IMAGE_NAME}:latest" .
+          docker save "${IMAGE}" -o /tmp/image.tar
+          ls -lh /tmp/image.tar
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp/image.tar
+          retention-days: 1
+
+  # ===========================================================================
+  # JOB 5 — Trivy image scan (réutilise l'artifact du job build)
+  # ===========================================================================
+  image-scan:
+    name: SCA — Trivy image
+    runs-on: ubuntu-latest
+    needs: [build]
+    steps:
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp
+
+      - name: Load image
+        run: docker load -i /tmp/image.tar
+
+      - name: Trivy image — table dans les logs
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          format: table
+          severity: HIGH,CRITICAL
+          vuln-type: os,library
+          ignore-unfixed: true
+          exit-code: '0'
+
+      - name: Trivy image — export SARIF
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          format: sarif
+          output: trivy-image.sarif
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+
+      - name: Upload SARIF (onglet Security)
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image
+
+  # ===========================================================================
+  # JOB 6 — SBOM CycloneDX avec Syft (rappel TP2)
+  # ===========================================================================
+  sbom:
+    name: SBOM — Syft CycloneDX
+    runs-on: ubuntu-latest
+    needs: [build]
+    steps:
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp
+
+      - name: Load image
+        run: docker load -i /tmp/image.tar
+
+      - name: Generate SBOM with Syft
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          format: cyclonedx-json
+          output-file: sbom.cyclonedx.json
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ github.sha }}
+          path: sbom.cyclonedx.json
+          retention-days: 30
+
+  # ===========================================================================
+  # JOB 7 — Conftest policy (test positif ET négatif)
+  # ===========================================================================
+  policy-check:
+    name: Policy — Conftest Rego
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Conftest (binaire officiel, pas l'action archivée)
+        run: |
+          VER=0.56.0
+          BASE=https://github.com/open-policy-agent/conftest/releases/download
+          wget -q "${BASE}/v${VER}/conftest_${VER}_Linux_x86_64.tar.gz"
+          tar xzf "conftest_${VER}_Linux_x86_64.tar.gz"
+          sudo mv conftest /usr/local/bin/
+          conftest --version
+
+      # Test positif : le manifeste durci doit passer
+      - name: Conftest — manifeste durci (doit PASSER)
+        run: |
+          echo "::group::Test positif sur k8s/deployment.yaml"
+          conftest test k8s/deployment.yaml --policy policy/
+          echo "::endgroup::"
+
+      # Test négatif : le manifeste dégradé doit échouer (démontre que la règle marche)
+      - name: Conftest — manifeste insecure (doit ÉCHOUER)
+        run: |
+          echo "::group::Test négatif sur k8s/deployment.insecure.yaml"
+          # On inverse le code de retour : si conftest échoue (comme attendu), le job réussit
+          if conftest test k8s/deployment.insecure.yaml --policy policy/ ; then
+            echo "❌ ERREUR : le manifeste insecure a passé la policy, c'est anormal."
+            exit 1
+          else
+            echo "✅ La policy a bien refusé le manifeste insecure."
+          fi
+          echo "::endgroup::"
+
+  # ===========================================================================
+  # JOB 8 — Quality gate : point unique de protection de branche
+  # ===========================================================================
+  quality-gate:
+    name: Quality Gate
+    runs-on: ubuntu-latest
+    needs: [secrets-scan, lint, sca-fs, build, image-scan, sbom, policy-check]
+    if: always()
+    steps:
+      - name: Synthèse finale
+        run: |
+          echo "### Résultat de chaque job" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Job | Statut |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| secrets-scan | ${{ needs.secrets-scan.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| lint         | ${{ needs.lint.result }} |"         >> "$GITHUB_STEP_SUMMARY"
+          echo "| sca-fs       | ${{ needs.sca-fs.result }} |"       >> "$GITHUB_STEP_SUMMARY"
+          echo "| build        | ${{ needs.build.result }} |"        >> "$GITHUB_STEP_SUMMARY"
+          echo "| image-scan   | ${{ needs.image-scan.result }} |"   >> "$GITHUB_STEP_SUMMARY"
+          echo "| sbom         | ${{ needs.sbom.result }} |"         >> "$GITHUB_STEP_SUMMARY"
+          echo "| policy-check | ${{ needs.policy-check.result }} |" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail si un job bloquant a échoué
+        run: |
+          if [[ "${{ needs.build.result }}" != "success" || \
+                "${{ needs.policy-check.result }}" != "success" ]]; then
+            echo "❌ Quality gate échoué : un job bloquant a échoué."
+            exit 1
+          fi
+          echo "✅ Quality gate validé."
