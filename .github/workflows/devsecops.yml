@@ -89,7 +89,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Trivy FS — table dans les logs
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.24.0
         with:
           scan-type: fs
           scan-ref: .
@@ -99,7 +99,7 @@ jobs:
           exit-code: '0'
 
       - name: Trivy FS — export SARIF
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.24.0
         with:
           scan-type: fs
           scan-ref: .
@@ -160,7 +160,7 @@ jobs:
         run: docker load -i /tmp/image.tar
 
       - name: Trivy image — table dans les logs
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.24.0
         with:
           image-ref: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
           format: table
@@ -170,7 +170,7 @@ jobs:
           exit-code: '0'
 
       - name: Trivy image — export SARIF
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.24.0
         with:
           image-ref: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
           format: sarif
